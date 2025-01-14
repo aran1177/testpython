@@ -19,7 +19,7 @@ from std_msgs.msg import String
 import logging
 import subprocess
 import signal
-import sys
+import sys,gc
 import psutil
 import atexit
 import binascii
@@ -61,7 +61,15 @@ class ObjectDetection(Node):
         #self.yolo_face=     YOLO('/home/ubuntu/AIClass/yoloface.pt')
         print('init yolo model success')
         # 初始化图片模式引擎
-        self.face_engine = FaceEngine()
+        self.face_engine = None
+        try:
+            self.face_engine = FaceEngine()
+            if not self.face_engine:
+                raise RuntimeError("Failed to initialize FaceEngine")
+        except Exception as e:
+            self.get_logger().error(f"FaceEngine initialization failed: {e}")
+            raise
+
         print('init face engine success')
         # camerainfo的id就可以拼接相机的节点名字，f'/camera_{id}/compressed'然后创建一个subscriber数组，
         self.cameras = self.get_camera_list_by_classid(self.classid)
@@ -114,9 +122,23 @@ class ObjectDetection(Node):
     def update_nodes(self):
         
         try:
-            for img in self.imgs:
-                self.taskImage(img)
-            # 打印每个类别的计数
+            self.get_logger().info(f'开始更新节点,object：课id{self.classid}-')
+            local_imgs = self.imgs.copy()  # 创建本地副本
+            self.imgs.clear()  # 立即清空原始列表
+            
+            for img in local_imgs:
+                try:
+                    self.taskImage(img)
+                except Exception as e:
+                    self.get_logger().error(f"Error processing image: {str(e)}")
+                finally:
+                    img = None  # 确保图像被释放
+            
+            # 处理完成后清理
+            local_imgs.clear()
+            
+            self.get_logger().info(f'处理完了，清理垃圾{self.classid}-')
+
             cursor=self.conn.cursor()
             for class_id, count in self.class_counts.items():
                 self.get_logger().info(f"Class {class_id} count: {count}")
@@ -300,7 +322,7 @@ class ObjectDetection(Node):
         """
         all_results = []
         height, width, channels = img.shape  # 注意：shape的顺序是(h,w,c)
-
+        self.get_logger().info(f'图像尺寸: {width}x{height}')
         # 设置切片参数
         slice_height = 640
         slice_width = 640
@@ -361,7 +383,7 @@ class ObjectDetection(Node):
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         output_path = os.path.join(self.path, f'result2_{self.classid}_{self.timer}_{timestamp}.jpg')
         cv2.imwrite(output_path, rgb_image)
-        
+        self.get_logger().info(f'保存分片识别的结果: {output_path}')
         # 合并重叠框
         filtered_results = self._merge_overlapping_boxes(raw_detections, img)
         
@@ -566,7 +588,10 @@ class ObjectDetection(Node):
             self.get_logger().info('开始检测')
             self.indeximg=0
         rgb_image = self.bridge.compressed_imgmsg_to_cv2(msg)
-        self.imgs.append(rgb_image)
+        if len(self.imgs) == 0:
+            self.imgs.append(rgb_image)
+        else:
+            self.imgs[0]=rgb_image
 
     #def callback(self, *msgs):
     def taskImage(self, rgb_image):
@@ -593,7 +618,7 @@ class ObjectDetection(Node):
             #self.MacFace(rgb_image)
             #能不能把rgb_image合成一张保存下来
             cv2.imwrite(f'{self.path}/rgb-{self.classid}-{self.timer}-{self.indeximg}.jpg', rgb_image)
-
+            print('test2')
             all_results=self.splitDect(rgb_image)
             for all_result in all_results:
                 x1, y1, x2, y2, conf, class_id ,personimg= all_result
